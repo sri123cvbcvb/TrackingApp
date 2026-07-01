@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useWebSocket } from '../hooks/useWebSocket.js';
 import { getSession, getLatestLocation } from '../services/api.js';
@@ -6,12 +6,16 @@ import Map from '../components/Map.jsx';
 import ConnectionStatus from '../components/ConnectionStatus.jsx';
 import StatusCard from '../components/StatusCard.jsx';
 
+const POLL_INTERVAL_MS = 5000; // Poll REST every 5 seconds when WS is down
+
 export default function ViewerPage() {
   const { trackingId } = useParams();
   const [location, setLocation] = useState(null);
   const [sessionInfo, setSessionInfo] = useState(null);
   const [sessionError, setSessionError] = useState(null);
   const [updateCount, setUpdateCount] = useState(0);
+  const [isPolling, setIsPolling] = useState(false); // true when falling back to REST
+  const pollIntervalRef = useRef(null);
 
   // Handler for incoming WebSocket location messages
   const onMessage = useCallback((data) => {
@@ -26,7 +30,35 @@ export default function ViewerPage() {
     autoConnect: true,
   });
 
-  // Fetch session info + latest location on mount (REST fallback for initial map center)
+  // ─── REST Polling Fallback ───────────────────────────────────────────────────
+  // When WebSocket is not connected, poll the REST endpoint every 5s to show
+  // the last known location — so the viewer still sees something useful.
+  useEffect(() => {
+    if (!isConnected && !isConnecting) {
+      // Start polling
+      setIsPolling(true);
+      const poll = async () => {
+        try {
+          const loc = await getLatestLocation(trackingId);
+          if (loc) {
+            setLocation(loc);
+          }
+        } catch {
+          // Silent fail — connection might be down
+        }
+      };
+      poll(); // Immediate first poll
+      pollIntervalRef.current = setInterval(poll, POLL_INTERVAL_MS);
+    } else {
+      // WebSocket is connected — stop polling
+      setIsPolling(false);
+      clearInterval(pollIntervalRef.current);
+    }
+
+    return () => clearInterval(pollIntervalRef.current);
+  }, [isConnected, isConnecting, trackingId]);
+
+  // ─── Fetch session info + initial location on mount ─────────────────────────
   useEffect(() => {
     getSession(trackingId)
       .then(setSessionInfo)
@@ -187,6 +219,22 @@ export default function ViewerPage() {
               </p>
             </div>
 
+            {/* REST Polling fallback notice */}
+            {isPolling && !isExpired && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: '8px',
+                background: 'rgba(245,158,11,0.08)',
+                border: '1px solid rgba(245,158,11,0.25)',
+                borderRadius: 'var(--radius-md)',
+                padding: '8px 12px',
+                fontSize: '0.75rem',
+                color: '#fbbf24',
+              }}>
+                <span className="spinner" style={{ width: '12px', height: '12px', borderWidth: '2px', borderColor: 'rgba(251,191,36,0.3)', borderTopColor: '#fbbf24', flexShrink: 0 }} />
+                <span>WebSocket reconnecting… showing last known location</span>
+              </div>
+            )}
+
             {/* Stats */}
             <StatusCard stats={stats} />
 
@@ -218,6 +266,7 @@ export default function ViewerPage() {
             <div style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', lineHeight: 2 }}>
               <div style={{ fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: '4px', fontSize: '0.8125rem' }}>How it works</div>
               <div>📡 Updates stream via WebSocket</div>
+              <div>🔄 Falls back to polling if WS drops</div>
               <div>🗺️ Marker moves in real time</div>
               <div>👥 Multiple viewers supported</div>
               <div>🔒 Private session link</div>

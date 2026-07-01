@@ -1,8 +1,8 @@
-import React, { useEffect, useRef, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import React, { useEffect, useRef, useCallback, useState } from 'react';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useGeolocation } from '../hooks/useGeolocation.js';
 import { useWebSocket } from '../hooks/useWebSocket.js';
-import { getSession } from '../services/api.js';
+import { getSession, expireSession } from '../services/api.js';
 import Map from '../components/Map.jsx';
 import ConnectionStatus from '../components/ConnectionStatus.jsx';
 import StatusCard from '../components/StatusCard.jsx';
@@ -12,24 +12,71 @@ const SEND_INTERVAL_MS = 4000; // Send location every 4 seconds
 
 export default function SenderPage() {
   const { trackingId } = useParams();
+  const navigate = useNavigate();
   const { position, error: geoError, permissionState } = useGeolocation();
-  const { isConnected, isConnecting, error: wsError, sendLocation } = useWebSocket();
+  const { isConnected, isConnecting, error: wsError, sendLocation, disconnect } = useWebSocket();
 
   const intervalRef = useRef(null);
   const updateCountRef = useRef(0);
-  const [updateCount, setUpdateCount] = React.useState(0);
-  const [sessionInfo, setSessionInfo] = React.useState(null);
+  const wakeLockRef = useRef(null);
+  const [updateCount, setUpdateCount] = useState(0);
+  const [sessionInfo, setSessionInfo] = useState(null);
+  const [wakeLockActive, setWakeLockActive] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   const viewUrl = `${window.location.origin}/track/${trackingId}`;
 
-  // Fetch session metadata on mount
+  // ─── Fetch session metadata on mount ────────────────────────────────────────
   useEffect(() => {
     getSession(trackingId)
       .then(setSessionInfo)
       .catch(() => setSessionInfo(null));
   }, [trackingId]);
 
-  // Periodically send location when connected and have position
+  // ─── Wake Lock API: keep screen on while sharing ─────────────────────────────
+  const acquireWakeLock = useCallback(async () => {
+    if ('wakeLock' in navigator) {
+      try {
+        wakeLockRef.current = await navigator.wakeLock.request('screen');
+        setWakeLockActive(true);
+        wakeLockRef.current.addEventListener('release', () => {
+          setWakeLockActive(false);
+        });
+      } catch (err) {
+        // Wake lock denied (battery saver mode etc.) — not critical
+        console.warn('[WakeLock] Could not acquire:', err.message);
+      }
+    }
+  }, []);
+
+  const releaseWakeLock = useCallback(() => {
+    if (wakeLockRef.current) {
+      wakeLockRef.current.release();
+      wakeLockRef.current = null;
+      setWakeLockActive(false);
+    }
+  }, []);
+
+  // Acquire wake lock on mount, release on unmount
+  useEffect(() => {
+    acquireWakeLock();
+    return () => releaseWakeLock();
+  }, [acquireWakeLock, releaseWakeLock]);
+
+  // ─── Page Visibility API: re-acquire wake lock when tab becomes visible ──────
+  // (browsers release wake lock automatically when tab is hidden)
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        // Re-acquire wake lock when user returns to this tab
+        acquireWakeLock();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [acquireWakeLock]);
+
+  // ─── Periodically send location when connected and have position ─────────────
   const doSend = useCallback(() => {
     if (isConnected && position) {
       sendLocation(trackingId, position.latitude, position.longitude);
@@ -40,12 +87,27 @@ export default function SenderPage() {
 
   useEffect(() => {
     if (isConnected && position) {
-      // Send immediately on connect/position available
-      doSend();
+      doSend(); // Send immediately on connect/position available
       intervalRef.current = setInterval(doSend, SEND_INTERVAL_MS);
     }
     return () => clearInterval(intervalRef.current);
   }, [isConnected, position, doSend]);
+
+  // ─── Stop Sharing handler ────────────────────────────────────────────────────
+  const handleStopSharing = useCallback(async () => {
+    if (stopping) return;
+    setStopping(true);
+    try {
+      clearInterval(intervalRef.current);
+      releaseWakeLock();
+      disconnect();
+      await expireSession(trackingId);
+    } catch (err) {
+      console.warn('[StopSharing] Could not expire session on server:', err.message);
+    } finally {
+      navigate('/');
+    }
+  }, [stopping, releaseWakeLock, disconnect, trackingId, navigate]);
 
   const formatCoord = (val) => val != null ? val.toFixed(6) : '—';
   const formatAccuracy = (val) => val != null ? `± ${Math.round(val)}m` : '—';
@@ -102,7 +164,7 @@ export default function SenderPage() {
             height="100%"
           />
 
-          {/* Floating status overlay on map */}
+          {/* Floating coordinate overlay on map */}
           {position && (
             <div style={{
               position: 'absolute', bottom: '20px', left: '20px', zIndex: 1000,
@@ -131,6 +193,26 @@ export default function SenderPage() {
           <div>
             <h2 style={{ fontSize: '1.125rem', marginBottom: '4px' }}>Sender Panel</h2>
             <p style={{ fontSize: '0.8125rem' }}>Your location is being shared live</p>
+          </div>
+
+          {/* Wake Lock status */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '8px',
+            background: wakeLockActive
+              ? 'rgba(16,185,129,0.08)'
+              : 'rgba(245,158,11,0.08)',
+            border: `1px solid ${wakeLockActive ? 'rgba(16,185,129,0.25)' : 'rgba(245,158,11,0.25)'}`,
+            borderRadius: 'var(--radius-md)',
+            padding: '8px 12px',
+            fontSize: '0.75rem',
+            color: wakeLockActive ? '#34d399' : '#fbbf24',
+          }}>
+            <span>{wakeLockActive ? '🔒' : '⚠️'}</span>
+            <span>
+              {wakeLockActive
+                ? 'Screen kept awake — safe to keep sharing'
+                : 'Wake lock inactive — keep screen on manually'}
+            </span>
           </div>
 
           {/* Permission warning */}
@@ -199,6 +281,41 @@ export default function SenderPage() {
               <div>🕐 Session started {new Date(sessionInfo.createdAt).toLocaleTimeString()}</div>
             )}
           </div>
+
+          {/* Stop Sharing button */}
+          <button
+            id="stop-sharing-btn"
+            className="btn"
+            onClick={handleStopSharing}
+            disabled={stopping}
+            style={{
+              marginTop: 'auto',
+              background: stopping ? 'rgba(244,63,94,0.3)' : 'rgba(244,63,94,0.15)',
+              border: '1px solid rgba(244,63,94,0.5)',
+              color: '#fda4af',
+              cursor: stopping ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '8px',
+              padding: '10px',
+              borderRadius: 'var(--radius-md)',
+              fontWeight: 600,
+              fontSize: '0.875rem',
+              transition: 'all 0.2s ease',
+            }}
+            onMouseEnter={e => { if (!stopping) e.currentTarget.style.background = 'rgba(244,63,94,0.25)'; }}
+            onMouseLeave={e => { if (!stopping) e.currentTarget.style.background = 'rgba(244,63,94,0.15)'; }}
+          >
+            {stopping ? (
+              <>
+                <span className="spinner" style={{ width: '14px', height: '14px', borderWidth: '2px', borderColor: 'rgba(253,164,175,0.3)', borderTopColor: '#fda4af' }} />
+                Stopping...
+              </>
+            ) : (
+              <>■ Stop Sharing</>
+            )}
+          </button>
         </div>
       </main>
     </div>
