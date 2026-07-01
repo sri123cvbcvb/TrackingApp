@@ -1,0 +1,53 @@
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+.mvn/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# Node / npm
+node_modules/
+dist/
+.cache/
+
+# Environment — NEVER commit secrets
+.env
+.env.local
+.env.production
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs
+*.log
+pinggy.log
+localhostrun.log
+localtunnel.log
+tunnel.log
+localhostrun_err.log
+localtunnel_err.log
+pinggy_err.log
+pinggy_url.log
+
+# SSH / tunnel artifacts
+temp_key
+temp_key.pub
+cloudflared.exe
+run-tunnel.js
+run-serveo-tunnel.js
+run-ssh-tunnel.js
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OS
+.DS_Store
+Thumbs.db
